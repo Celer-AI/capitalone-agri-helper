@@ -145,7 +145,7 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific
-*.pdf
+
 *.mp3
 *.wav
 *.ogg

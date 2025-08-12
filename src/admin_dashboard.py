@@ -71,26 +71,80 @@ class AdminDashboard:
             return False
         
         return True
-    
+
+    def _get_real_metrics(self):
+        """Get real metrics from database."""
+        try:
+            # Get total users
+            try:
+                users_result = self.database.client.table('users').select('count').execute()
+                total_users = len(users_result.data) if users_result.data else 0
+            except:
+                total_users = 0
+
+            # Get total documents
+            try:
+                docs_result = self.database.client.table('documents').select('count').execute()
+                total_documents = len(docs_result.data) if docs_result.data else 0
+            except:
+                total_documents = 0
+
+            # Get daily queries (today)
+            try:
+                from datetime import datetime
+                today = datetime.now().date()
+                chat_result = self.database.client.table('chat_history').select('count').gte('created_at', f'{today}T00:00:00').execute()
+                daily_queries = len(chat_result.data) if chat_result.data else 0
+            except:
+                daily_queries = 0
+
+            # Calculate success rate (placeholder for now)
+            try:
+                analytics_result = self.database.client.table('analytics').select('event_type').eq('event_type', 'successful_query').execute()
+                successful = len(analytics_result.data) if analytics_result.data else 0
+                total_analytics = self.database.client.table('analytics').select('count').execute()
+                total = len(total_analytics.data) if total_analytics.data else 1
+                success_rate = (successful / total) * 100 if total > 0 else 0
+            except:
+                success_rate = 0
+
+            return {
+                'total_users': total_users,
+                'total_documents': total_documents,
+                'daily_queries': daily_queries,
+                'success_rate': success_rate
+            }
+        except Exception as e:
+            st.error(f"Error fetching metrics: {e}")
+            return {
+                'total_users': 0,
+                'total_documents': 0,
+                'daily_queries': 0,
+                'success_rate': 0
+            }
+
     def _show_analytics_dashboard(self):
-        """Display analytics dashboard."""
+        """Display analytics dashboard with real data."""
         st.title("📊 Analytics Dashboard")
         st.markdown("---")
-        
+
+        # Get real metrics
+        metrics = self._get_real_metrics()
+
         # Key metrics
         col1, col2, col3, col4 = st.columns(4)
-        
+
         with col1:
-            st.metric("Total Users", "Loading...", help="Total unique users")
-        
+            st.metric("Total Users", metrics['total_users'], help="Total unique users")
+
         with col2:
-            st.metric("Daily Queries", "Loading...", help="Queries today")
-        
+            st.metric("Daily Queries", metrics['daily_queries'], help="Queries today")
+
         with col3:
-            st.metric("Success Rate", "Loading...", help="Successful query rate")
-        
+            st.metric("Success Rate", f"{metrics['success_rate']:.1f}%", help="Successful query rate")
+
         with col4:
-            st.metric("Documents", "Loading...", help="Total documents in knowledge base")
+            st.metric("Documents", metrics['total_documents'], help="Total documents in knowledge base")
         
         # Charts section
         st.markdown("### 📈 Usage Trends")

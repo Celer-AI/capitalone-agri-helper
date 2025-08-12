@@ -1,0 +1,54 @@
+# Docker Compose for local development
+version: '3.8'
+
+services:
+  agri-credit-helper:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - ENVIRONMENT=development
+      - LOG_LEVEL=DEBUG
+      - PORT=8080
+    env_file:
+      - .env
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Local PostgreSQL for development
+  # postgres:
+  #   image: postgres:15
+  #   environment:
+  #     POSTGRES_DB: agri_credit_helper
+  #     POSTGRES_USER: postgres
+  #     POSTGRES_PASSWORD: postgres
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+
+  # Admin dashboard (separate container)
+  admin-dashboard:
+    build: .
+    command: ["streamlit", "run", "src/admin_dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    ports:
+      - "8501:8501"
+    environment:
+      - ENVIRONMENT=development
+    env_file:
+      - .env
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped
+    depends_on:
+      - agri-credit-helper
+
+# volumes:
+#   postgres_data:

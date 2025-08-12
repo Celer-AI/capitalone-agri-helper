@@ -1,0 +1,446 @@
+"""AI services for embedding, generation, and reranking."""
+
+import asyncio
+import time
+from typing import List, Dict, Any, Optional
+import numpy as np
+from google import genai
+from google.genai import types
+import cohere
+import structlog
+from asyncio_throttle import Throttler
+from src.config import settings, SYSTEM_PROMPT, DOCUMENT_CLEANING_PROMPT
+from pydantic import BaseModel
+from typing import Literal
+
+logger = structlog.get_logger()
+
+
+# Structured output models for AI responses
+class LanguageDetectionResponse(BaseModel):
+    """Structured response for language detection."""
+    detected_language: Literal["Hindi", "Tamil", "Telugu", "Bengali", "Marathi", "Gujarati", "Kannada", "Malayalam", "Punjabi", "Odia", "English"]
+    confidence: float
+    reasoning: str
+
+class QueryImprovementResponse(BaseModel):
+    """Structured response for query improvement."""
+    improved_query: str
+    original_query: str
+    improvements_made: List[str]
+    search_keywords: List[str]
+
+class ChatResponse(BaseModel):
+    """Structured response for chat interactions."""
+    response_text: str
+    language: str
+    confidence_score: float
+    sources_used: List[str]
+    response_type: Literal["direct_answer", "no_context", "partial_info"]
+    suggested_actions: List[str]
+
+
+class AIServices:
+    """Manages all AI-related operations with rate limiting."""
+
+    def __init__(self):
+        # Initialize Google GenAI client with API key
+        self.genai_client = genai.Client(api_key=settings.gemini_api_key)
+
+        # Initialize Cohere client (using ClientV2 for latest API)
+        self.cohere_client = cohere.ClientV2(api_key=settings.cohere_api_key)
+
+        # Rate limiting for Gemini Embedding API (100 RPM, 30k TPM)
+        self.embedding_throttler = Throttler(rate_limit=90, period=60)  # 90 per minute to be safe
+
+        # Track token usage for TPM limiting
+        self.token_usage_window = []
+        self.max_tokens_per_minute = settings.gemini_embedding_tpm_limit
+    
+    async def _check_token_limit(self, estimated_tokens: int) -> bool:
+        """Check if we're within token per minute limits."""
+        current_time = time.time()
+
+        # Remove tokens older than 1 minute
+        self.token_usage_window = [
+            (tokens, timestamp) for tokens, timestamp in self.token_usage_window
+            if current_time - timestamp < 60
+        ]
+
+        # Calculate current usage
+        current_usage = sum(tokens for tokens, _ in self.token_usage_window)
+
+        # Check if adding new tokens would exceed limit
+        if current_usage + estimated_tokens > self.max_tokens_per_minute:
+            logger.warning("Token limit would be exceeded",
+                         current_usage=current_usage,
+                         estimated_tokens=estimated_tokens,
+                         limit=self.max_tokens_per_minute)
+            return False
+
+        return True
+
+    async def generate_embedding(self, text: str, task_type: str = "RETRIEVAL_QUERY") -> Optional[List[float]]:
+        """Generate embedding for text using Gemini embedding model with rate limiting."""
+        try:
+            # Estimate tokens (rough approximation: 1 token ≈ 4 characters)
+            estimated_tokens = len(text) // 4
+
+            # Check token limits
+            if not await self._check_token_limit(estimated_tokens):
+                await asyncio.sleep(10)  # Wait before retrying
+                if not await self._check_token_limit(estimated_tokens):
+                    logger.error("Token limit exceeded, skipping embedding generation")
+                    return None
+
+            # Apply rate limiting
+            async with self.embedding_throttler:
+                result = self.genai_client.models.embed_content(
+                    model=settings.embedding_model,
+                    contents=text,
+                    config=types.EmbedContentConfig(
+                        task_type=task_type,
+                        output_dimensionality=settings.embedding_dimensions
+                    )
+                )
+
+                # Track token usage
+                self.token_usage_window.append((estimated_tokens, time.time()))
+
+            if result.embeddings:
+                embedding_values = result.embeddings[0].values
+
+                # Normalize embedding for better similarity search
+                if settings.embedding_dimensions != 3072:
+                    embedding_array = np.array(embedding_values)
+                    normalized_embedding = embedding_array / np.linalg.norm(embedding_array)
+                    return normalized_embedding.tolist()
+
+                return embedding_values
+
+            return None
+
+        except Exception as e:
+            logger.error("Failed to generate embedding", text_length=len(text), error=str(e))
+            return None
+    
+    async def generate_embeddings_batch(self, texts: List[str], task_type: str = "RETRIEVAL_DOCUMENT") -> List[Optional[List[float]]]:
+        """Generate embeddings for multiple texts."""
+        try:
+            result = self.genai_client.models.embed_content(
+                model=settings.embedding_model,
+                contents=texts,
+                config=types.EmbedContentConfig(
+                    task_type=task_type,
+                    output_dimensionality=settings.embedding_dimensions
+                )
+            )
+            
+            embeddings = []
+            for embedding_obj in result.embeddings:
+                if embedding_obj and embedding_obj.values:
+                    embedding_values = embedding_obj.values
+                    
+                    # Normalize if not using default dimension
+                    if settings.embedding_dimensions != 3072:
+                        embedding_array = np.array(embedding_values)
+                        normalized_embedding = embedding_array / np.linalg.norm(embedding_array)
+                        embeddings.append(normalized_embedding.tolist())
+                    else:
+                        embeddings.append(embedding_values)
+                else:
+                    embeddings.append(None)
+            
+            return embeddings
+            
+        except Exception as e:
+            logger.error("Failed to generate batch embeddings", batch_size=len(texts), error=str(e))
+            return [None] * len(texts)
+    
+    async def transcribe_audio(self, audio_data: bytes, mime_type: str = "audio/ogg") -> Optional[Dict[str, Any]]:
+        """Transcribe audio using Gemini with structured output including language detection."""
+        try:
+            # Create audio part from bytes
+            audio_part = types.Part.from_bytes(
+                data=audio_data,
+                mime_type=mime_type
+            )
+
+            prompt = """Transcribe this audio message and provide structured output. The speaker is likely an Indian farmer asking about agricultural finance or government schemes.
+
+Respond with this exact JSON structure:
+{
+    "transcribed_text": "The exact transcription in the original language",
+    "detected_language": "Hindi|Tamil|Telugu|Bengali|Marathi|Gujarati|Kannada|Malayalam|Punjabi|Odia|English",
+    "confidence": 0.95,
+    "intent_category": "scheme_inquiry|loan_question|eligibility_check|general_agriculture|unclear",
+    "key_terms": ["PM-KISAN", "loan", "subsidy"]
+}
+
+Rules:
+1. Transcribe exactly what was said, preserving the original language
+2. Detect the primary language used
+3. Identify the intent category based on content
+4. Extract key agricultural/financial terms mentioned
+5. Set confidence based on audio clarity and language detection certainty"""
+
+            response = self.genai_client.models.generate_content(
+                model=settings.llm_model,
+                contents=[prompt, audio_part],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json"
+                )
+            )
+
+            if response.text:
+                try:
+                    import json
+                    return json.loads(response.text)
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.warning("Failed to parse transcription JSON, returning text only", error=str(e))
+                    return {
+                        "transcribed_text": response.text,
+                        "detected_language": "Unknown",
+                        "confidence": 0.7,
+                        "intent_category": "unclear",
+                        "key_terms": []
+                    }
+
+            return None
+
+        except Exception as e:
+            logger.error("Failed to transcribe audio", error=str(e))
+            return None
+    
+    async def rerank_documents(self, query: str, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Rerank documents using Cohere's rerank API v3.5 with context limit handling."""
+        try:
+            if not documents:
+                return []
+
+            # Prepare documents for reranking with context limit consideration
+            doc_texts = []
+            doc_mapping = []
+            total_chars = 0
+
+            for i, doc in enumerate(documents):
+                content = doc['content']
+                # Estimate if adding this document would exceed context limit
+                # Rough estimate: 1 token ≈ 4 characters, context limit is 4096 tokens
+                if total_chars + len(content) > settings.rerank_context_limit * 4:
+                    logger.warning("Rerank context limit reached",
+                                 docs_included=len(doc_texts),
+                                 total_docs=len(documents))
+                    break
+
+                doc_texts.append(content)
+                doc_mapping.append(i)
+                total_chars += len(content)
+
+            if not doc_texts:
+                logger.warning("No documents fit within rerank context limit")
+                return documents[:settings.rerank_top_k]
+
+            # Use Cohere rerank v3.5 with proper configuration
+            rerank_response = self.cohere_client.rerank(
+                model=settings.rerank_model,
+                query=query,
+                documents=doc_texts,
+                top_n=min(settings.rerank_top_k, len(doc_texts)),
+                max_tokens_per_doc=settings.rerank_max_tokens_per_doc,
+                return_documents=False  # We don't need documents back, just indices
+            )
+
+            # Return reranked documents with scores
+            reranked_docs = []
+            for result in rerank_response.results:
+                original_index = doc_mapping[result.index]
+                original_doc = documents[original_index]
+                reranked_docs.append({
+                    **original_doc,
+                    'rerank_score': result.relevance_score
+                })
+
+            logger.info("Documents reranked successfully",
+                       input_docs=len(documents),
+                       processed_docs=len(doc_texts),
+                       output_docs=len(reranked_docs))
+
+            return reranked_docs
+
+        except Exception as e:
+            logger.error("Failed to rerank documents",
+                        query_length=len(query),
+                        doc_count=len(documents),
+                        error=str(e))
+            # Fallback: return top documents without reranking
+            return documents[:settings.rerank_top_k]
+    
+    async def generate_response(self, query: str, context_docs: List[Dict[str, Any]], user_language: str = "Hindi") -> Optional[ChatResponse]:
+        """Generate structured response using Gemini with context documents."""
+        try:
+            # Prepare context from documents
+            context_text = "\n\n".join([
+                f"Document: {doc['source_document']}\nContent: {doc['content']}"
+                for doc in context_docs
+            ])
+
+            sources_list = [doc.get('source_document', 'Unknown') for doc in context_docs]
+
+            # Construct structured prompt
+            prompt = f"""Based on the following government policy documents, provide a structured JSON response about agricultural finance schemes.
+
+CONTEXT DOCUMENTS:
+{context_text}
+
+USER QUESTION: {query}
+
+Respond with this exact JSON structure:
+{{
+    "response_text": "Your helpful answer in {user_language}",
+    "language": "{user_language}",
+    "confidence_score": 0.95,
+    "sources_used": {sources_list},
+    "response_type": "direct_answer",
+    "suggested_actions": ["Contact local agriculture office", "Apply for scheme X"]
+}}
+
+Rules:
+1. response_text MUST be in {user_language}
+2. confidence_score: 0.9+ if fully answered, 0.5-0.8 if partial, 0.1-0.4 if minimal info
+3. response_type: "direct_answer", "partial_info", or "no_context"
+4. suggested_actions: practical next steps for the farmer
+5. Only use information from provided documents"""
+
+            response = self.genai_client.models.generate_content(
+                model=settings.llm_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.1,
+                    response_mime_type="application/json"
+                )
+            )
+
+            if response.text:
+                try:
+                    import json
+                    response_data = json.loads(response.text)
+                    return ChatResponse(**response_data)
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.warning("Failed to parse structured response, creating fallback", error=str(e))
+                    # Fallback to simple response
+                    return ChatResponse(
+                        response_text=response.text,
+                        language=user_language,
+                        confidence_score=0.7,
+                        sources_used=sources_list,
+                        response_type="direct_answer",
+                        suggested_actions=["Contact local agriculture office for more details"]
+                    )
+
+            return None
+
+        except Exception as e:
+            logger.error("Failed to generate response", query_length=len(query), context_docs_count=len(context_docs), error=str(e))
+            return None
+    
+    async def clean_document_text(self, raw_text: str) -> Optional[str]:
+        """Clean document text using AI."""
+        try:
+            response = self.genai_client.models.generate_content(
+                model=settings.llm_model,
+                contents=f"{DOCUMENT_CLEANING_PROMPT}\n\n{raw_text}",
+                config=types.GenerateContentConfig(
+                    temperature=0.1
+                )
+            )
+            
+            return response.text if response.text else None
+            
+        except Exception as e:
+            logger.error("Failed to clean document text", text_length=len(raw_text), error=str(e))
+            return None
+    
+    async def detect_language(self, text: str) -> LanguageDetectionResponse:
+        """Detect the language of user input with structured output."""
+        try:
+            prompt = f"""Analyze the language of this text and respond with JSON:
+
+Text: {text}
+
+Respond with this exact JSON structure:
+{{
+    "detected_language": "Hindi|Tamil|Telugu|Bengali|Marathi|Gujarati|Kannada|Malayalam|Punjabi|Odia|English",
+    "confidence": 0.95,
+    "reasoning": "Brief explanation of detection"
+}}
+
+Rules:
+1. detected_language must be one of the listed options
+2. confidence: 0.9+ if very sure, 0.7-0.8 if somewhat sure, 0.5-0.6 if uncertain
+3. reasoning: brief explanation of why you detected this language"""
+
+            response = self.genai_client.models.generate_content(
+                model=settings.llm_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json"
+                )
+            )
+
+            if response.text:
+                try:
+                    import json
+                    response_data = json.loads(response.text)
+                    return LanguageDetectionResponse(**response_data)
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.warning("Failed to parse language detection response", error=str(e))
+
+            # Fallback
+            return LanguageDetectionResponse(
+                detected_language="Hindi",
+                confidence=0.5,
+                reasoning="Fallback due to parsing error"
+            )
+
+        except Exception as e:
+            logger.error("Failed to detect language", text_length=len(text), error=str(e))
+            return LanguageDetectionResponse(
+                detected_language="Hindi",
+                confidence=0.5,
+                reasoning="Error in detection process"
+            )
+    
+    async def improve_query(self, user_query: str) -> str:
+        """Improve user query for better retrieval."""
+        try:
+            response = self.genai_client.models.generate_content(
+                model=settings.llm_model,
+                contents=f"""You are helping to improve a farmer's query for searching agricultural finance information. 
+
+Original query: {user_query}
+
+Please rewrite this query to be more specific and effective for searching government agricultural finance schemes and policies. Focus on:
+1. Key terms related to agricultural finance
+2. Specific scheme names if mentioned
+3. Clear intent about what information is needed
+
+Respond with only the improved query, nothing else.""",
+                config=types.GenerateContentConfig(
+                    temperature=0.2
+                )
+            )
+            
+            improved_query = response.text.strip() if response.text else user_query
+            return improved_query
+            
+        except Exception as e:
+            logger.error("Failed to improve query", query=user_query, error=str(e))
+            return user_query  # Return original query on failure
+
+
+# Global AI services instance
+ai_services = AIServices()

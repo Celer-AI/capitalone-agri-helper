@@ -18,7 +18,7 @@ class RAGPipeline:
         self.ai_services = ai_services
         self.database = db
     
-    async def process_query(self, user_query: str, user_id: int) -> Tuple[Optional[str], Dict[str, Any]]:
+    async def process_query(self, user_query: str, user_id: int, force_language: Optional[str] = None) -> Tuple[Optional[str], Dict[str, Any]]:
         """
         Process a user query through the complete RAG pipeline.
         
@@ -38,11 +38,18 @@ class RAGPipeline:
         try:
             start_time = time.time()
 
-            # Step 1: Detect language with structured output
-            language_result = await self.ai_services.detect_language(user_query)
-            metadata['language_detected'] = language_result.detected_language
-            metadata['language_confidence'] = language_result.confidence
-            metadata['pipeline_steps']['language_detection'] = True
+            # Step 1: Detect language, but allow audio transcription to override it
+            final_language = "Hindi" # Default
+            if force_language:
+                final_language = force_language
+                metadata['pipeline_steps']['language_detection'] = 'overridden_by_audio'
+            else:
+                language_result = await self.ai_services.detect_language(user_query)
+                final_language = language_result.detected_language
+                metadata['language_confidence'] = language_result.confidence
+                metadata['pipeline_steps']['language_detection'] = True
+
+            metadata['language_detected'] = final_language
 
             # Step 2: Improve query for better retrieval
             improved_query = await self.ai_services.improve_query(user_query)
@@ -72,7 +79,7 @@ class RAGPipeline:
 
             if not retrieved_docs:
                 logger.warning("No documents retrieved for query", user_id=user_id, query=user_query)
-                return await self._generate_no_context_response(user_query, language_result.detected_language), metadata
+                return await self._generate_no_context_response(user_query, final_language), metadata
 
             # Step 5: Rerank documents for relevance
             reranked_docs = await self.ai_services.rerank_documents(user_query, retrieved_docs)
@@ -83,7 +90,7 @@ class RAGPipeline:
             chat_response = await self.ai_services.generate_response(
                 user_query,
                 reranked_docs,
-                language_result.detected_language
+                final_language  # Use the final detected language here
             )
             
             if chat_response:
@@ -93,9 +100,7 @@ class RAGPipeline:
                 metadata['success'] = True
                 metadata['pipeline_steps']['response_generation'] = True
                 metadata['response_confidence'] = chat_response.confidence_score
-                metadata['response_type'] = chat_response.response_type
                 metadata['sources_used'] = chat_response.sources_used
-                metadata['suggested_actions'] = chat_response.suggested_actions
                 metadata['response_time_ms'] = response_time_ms
 
                 # Log successful interaction with enhanced metadata
@@ -106,11 +111,10 @@ class RAGPipeline:
                         'query_length': len(user_query),
                         'retrieved_docs': len(retrieved_docs),
                         'reranked_docs': len(reranked_docs),
-                        'language': language_result.detected_language,
-                        'language_confidence': language_result.confidence,
+                        'language': final_language,
+                        'language_confidence': metadata.get('language_confidence', 0.9),
                         'response_length': len(chat_response.response_text),
                         'response_confidence': chat_response.confidence_score,
-                        'response_type': chat_response.response_type,
                         'response_time_ms': response_time_ms
                     }
                 )
@@ -169,36 +173,31 @@ I can only provide information about government schemes that are in my database.
     
     async def process_voice_query(self, audio_data: bytes, mime_type: str, user_id: int) -> Tuple[Optional[str], Dict[str, Any]]:
         """Process voice query through transcription and RAG pipeline."""
-        metadata = {
-            'user_id': user_id,
-            'input_type': 'voice',
-            'audio_size': len(audio_data),
-            'transcription': None,
-            'success': False
-        }
-        
+        metadata = { 'user_id': user_id, 'input_type': 'voice' }
+
         try:
-            # Step 1: Transcribe audio
-            transcribed_text = await self.ai_services.transcribe_audio(audio_data, mime_type)
-            
-            if not transcribed_text:
-                logger.error("Failed to transcribe audio", user_id=user_id)
+            # Step 1: Transcribe audio using the new function
+            transcription_result = await self.ai_services.transcribe_audio(audio_data, mime_type)
+
+            if not transcription_result or 'transcribed_english_text' not in transcription_result:
+                logger.error("Failed to get valid transcription", user_id=user_id)
                 return None, metadata
-            
+
+            transcribed_text = transcription_result['transcribed_english_text']
+            detected_language = transcription_result.get('detected_language', 'Hindi') # Default to Hindi
+
             metadata['transcription'] = transcribed_text
-            
-            # Step 2: Process transcribed text through RAG pipeline
-            response, rag_metadata = await self.process_query(transcribed_text, user_id)
-            
-            # Merge metadata
+            metadata['detected_language_from_audio'] = detected_language
+
+            # Step 2: Process the ENGLISH transcription through the RAG pipeline
+            # We will tell the final generation step to use the original detected language
+            response, rag_metadata = await self.process_query(transcribed_text, user_id, force_language=detected_language)
+
             metadata.update(rag_metadata)
-            metadata['success'] = rag_metadata.get('success', False)
-            
             return response, metadata
-            
+
         except Exception as e:
             logger.error("Voice query processing failed", user_id=user_id, error=str(e))
-            metadata['error'] = str(e)
             return None, metadata
     
     async def get_conversation_context(self, user_id: int, limit: int = 5) -> List[Dict[str, Any]]:

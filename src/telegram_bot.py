@@ -110,11 +110,10 @@ class TelegramBotHandler:
                     response_time_ms=metadata.get('response_time_ms')
                 )
 
-                # Send response
+                # Send response (remove Markdown parsing to avoid entity errors)
                 await self.bot.send_message(
                     chat_id=message.chat_id,
-                    text=response,
-                    parse_mode='Markdown'
+                    text=response
                 )
 
                 # Send feedback buttons
@@ -165,11 +164,10 @@ class TelegramBotHandler:
                     response_time_ms=metadata.get('response_time_ms')
                 )
 
-                # Send response
+                # Send response (remove Markdown parsing to avoid entity errors)
                 await self.bot.send_message(
                     chat_id=message.chat_id,
-                    text=response,
-                    parse_mode='Markdown'
+                    text=response
                 )
 
                 # Send feedback buttons

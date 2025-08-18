@@ -5,6 +5,9 @@
 
 set -e
 
+# Export Homebrew path for macOS
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 echo "🚀 Starting Agri-Credit Helper in development mode..."
 
 # Check if .env file exists

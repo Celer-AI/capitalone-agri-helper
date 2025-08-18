@@ -53,8 +53,7 @@ gcloud run deploy $SERVICE_NAME \
     --max-instances 10 \
     --min-instances 1 \
     --concurrency 80 \
-    --timeout 300 \
-    --set-env-vars ENVIRONMENT=production,PORT=8080
+    --timeout 300 
 
 # Get the service URL
 SERVICE_URL=$(gcloud run services describe $SERVICE_NAME --region $REGION --format 'value(status.url)')

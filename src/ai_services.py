@@ -31,13 +31,11 @@ class QueryImprovementResponse(BaseModel):
     search_keywords: List[str]
 
 class ChatResponse(BaseModel):
-    """Structured response for chat interactions."""
+    """Simplified and more reliable structured response for chat interactions."""
     response_text: str
     language: str
     confidence_score: float
     sources_used: List[str]
-    response_type: Literal["direct_answer", "no_context", "partial_info"]
-    suggested_actions: List[str]
 
 
 class AIServices:
@@ -158,37 +156,30 @@ class AIServices:
             return [None] * len(texts)
     
     async def transcribe_audio(self, audio_data: bytes, mime_type: str = "audio/ogg") -> Optional[Dict[str, Any]]:
-        """Transcribe audio using Gemini with structured output including language detection."""
+        """
+        Transcribes audio to ENGLISH for accuracy and detects the original spoken language.
+        """
         try:
-            # Create audio part from bytes
-            audio_part = types.Part.from_bytes(
-                data=audio_data,
-                mime_type=mime_type
-            )
+            audio_part = types.Part.from_bytes(data=audio_data, mime_type=mime_type)
 
-            prompt = """Transcribe this audio message and provide structured output. The speaker is likely an Indian farmer asking about agricultural finance or government schemes.
+            # New, simpler, more reliable prompt
+            prompt = """
+            Your task is to analyze this audio file from an Indian farmer.
+            1.  Accurately transcribe the spoken words into ENGLISH text.
+            2.  Reliably detect the primary spoken language (e.g., Hindi, Tamil, English, Hinglish).
 
-Respond with this exact JSON structure:
-{
-    "transcribed_text": "The exact transcription in the original language",
-    "detected_language": "Hindi|Tamil|Telugu|Bengali|Marathi|Gujarati|Kannada|Malayalam|Punjabi|Odia|English",
-    "confidence": 0.95,
-    "intent_category": "scheme_inquiry|loan_question|eligibility_check|general_agriculture|unclear",
-    "key_terms": ["PM-KISAN", "loan", "subsidy"]
-}
+            Respond with this exact JSON structure:
+            {
+                "transcribed_english_text": "The accurate English transcription of the audio.",
+                "detected_language": "The detected language, e.g., Hindi"
+            }
+            """
 
-Rules:
-1. Transcribe exactly what was said, preserving the original language
-2. Detect the primary language used
-3. Identify the intent category based on content
-4. Extract key agricultural/financial terms mentioned
-5. Set confidence based on audio clarity and language detection certainty"""
-
-            response = self.genai_client.models.generate_content(
-                model=settings.llm_model,
-                contents=[prompt, audio_part],
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
+            # Note: We are now using a standard generation model, not a specialized one
+            model = genai.GenerativeModel(settings.llm_model)
+            response = await model.generate_content_async(
+                [prompt, audio_part],
+                generation_config=types.GenerationConfig(
                     response_mime_type="application/json"
                 )
             )
@@ -198,15 +189,8 @@ Rules:
                     import json
                     return json.loads(response.text)
                 except (json.JSONDecodeError, ValueError) as e:
-                    logger.warning("Failed to parse transcription JSON, returning text only", error=str(e))
-                    return {
-                        "transcribed_text": response.text,
-                        "detected_language": "Unknown",
-                        "confidence": 0.7,
-                        "intent_category": "unclear",
-                        "key_terms": []
-                    }
-
+                    logger.error("Failed to parse transcription JSON", error=str(e), response_text=response.text)
+                    return None
             return None
 
         except Exception as e:
@@ -247,9 +231,7 @@ Rules:
                 model=settings.rerank_model,
                 query=query,
                 documents=doc_texts,
-                top_n=min(settings.rerank_top_k, len(doc_texts)),
-                max_tokens_per_doc=settings.rerank_max_tokens_per_doc,
-                return_documents=False  # We don't need documents back, just indices
+                top_n=min(settings.rerank_top_k, len(doc_texts))
             )
 
             # Return reranked documents with scores
@@ -278,68 +260,55 @@ Rules:
             return documents[:settings.rerank_top_k]
     
     async def generate_response(self, query: str, context_docs: List[Dict[str, Any]], user_language: str = "Hindi") -> Optional[ChatResponse]:
-        """Generate structured response using Gemini with context documents."""
+        """Generate a user-facing response using Gemini with context documents."""
         try:
             # Prepare context from documents
             context_text = "\n\n".join([
-                f"Document: {doc['source_document']}\nContent: {doc['content']}"
+                f"Source Document: {doc['source_document']}\nContent: {doc['content']}"
                 for doc in context_docs
             ])
 
-            sources_list = [doc.get('source_document', 'Unknown') for doc in context_docs]
+            # Get a unique list of sources
+            sources_list = sorted(list(set(doc.get('source_document', 'Unknown') for doc in context_docs)))
 
-            # Construct structured prompt
-            prompt = f"""Based on the following government policy documents, provide a structured JSON response about agricultural finance schemes.
+            # New, simpler, more reliable prompt
+            prompt = f"""
+            **Context from Government Documents:**
+            ---
+            {context_text}
+            ---
 
-CONTEXT DOCUMENTS:
-{context_text}
+            **User's Question:** "{query}"
 
-USER QUESTION: {query}
+            **Your Task:**
+            Based *only* on the provided context, answer the user's question.
 
-Respond with this exact JSON structure:
-{{
-    "response_text": "Your helpful answer in {user_language}",
-    "language": "{user_language}",
-    "confidence_score": 0.95,
-    "sources_used": {sources_list},
-    "response_type": "direct_answer",
-    "suggested_actions": ["Contact local agriculture office", "Apply for scheme X"]
-}}
+            **Response Rules:**
+            1.  **Language:** You MUST write your entire response in **{user_language}**.
+            2.  **Persona:** Act as a friendly, helpful assistant for a farmer. Use simple, clear language.
+            3.  **Content:** Directly answer the question using facts from the context. If the context doesn't contain the answer, politely state that you don't have that specific information and suggest they contact a local bank or agriculture office.
+            4.  **Citations:** At the very end of your response, add the sources you used in the format `[Source: document_name.pdf]`.
 
-Rules:
-1. response_text MUST be in {user_language}
-2. confidence_score: 0.9+ if fully answered, 0.5-0.8 if partial, 0.1-0.4 if minimal info
-3. response_type: "direct_answer", "partial_info", or "no_context"
-4. suggested_actions: practical next steps for the farmer
-5. Only use information from provided documents"""
+            Please provide only the text of the response you want me to send to the farmer.
+            """
 
             response = self.genai_client.models.generate_content(
                 model=settings.llm_model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT,
-                    temperature=0.1,
-                    response_mime_type="application/json"
+                    temperature=0.1
                 )
             )
 
             if response.text:
-                try:
-                    import json
-                    response_data = json.loads(response.text)
-                    return ChatResponse(**response_data)
-                except (json.JSONDecodeError, ValueError) as e:
-                    logger.warning("Failed to parse structured response, creating fallback", error=str(e))
-                    # Fallback to simple response
-                    return ChatResponse(
-                        response_text=response.text,
-                        language=user_language,
-                        confidence_score=0.7,
-                        sources_used=sources_list,
-                        response_type="direct_answer",
-                        suggested_actions=["Contact local agriculture office for more details"]
-                    )
-
+                # We create the ChatResponse object ourselves, making it more robust
+                return ChatResponse(
+                    response_text=response.text,
+                    language=user_language,
+                    confidence_score=0.9,  # We can add more logic for this later
+                    sources_used=sources_list
+                )
             return None
 
         except Exception as e:

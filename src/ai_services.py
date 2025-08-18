@@ -156,41 +156,23 @@ class AIServices:
             return [None] * len(texts)
     
     async def transcribe_audio(self, audio_data: bytes, mime_type: str = "audio/ogg") -> Optional[Dict[str, Any]]:
-        """
-        Transcribes audio to ENGLISH for accuracy and detects the original spoken language.
-        """
+        """Transcribe audio to text and detect language."""
         try:
             audio_part = types.Part.from_bytes(data=audio_data, mime_type=mime_type)
+            prompt = "Transcribe this audio to English text and detect the original language. Return JSON: {\"transcribed_english_text\": \"text here\", \"detected_language\": \"Hindi\"}"
 
-            # New, simpler, more reliable prompt
-            prompt = """
-            Your task is to analyze this audio file from an Indian farmer.
-            1.  Accurately transcribe the spoken words into ENGLISH text.
-            2.  Reliably detect the primary spoken language (e.g., Hindi, Tamil, English, Hinglish).
-
-            Respond with this exact JSON structure:
-            {
-                "transcribed_english_text": "The accurate English transcription of the audio.",
-                "detected_language": "The detected language, e.g., Hindi"
-            }
-            """
-
-            # Note: We are now using a standard generation model, not a specialized one
-            model = genai.GenerativeModel(settings.llm_model)
-            response = await model.generate_content_async(
-                [prompt, audio_part],
-                generation_config=types.GenerationConfig(
-                    response_mime_type="application/json"
+            response = self.genai_client.models.generate_content(
+                model=settings.llm_model,
+                contents=[prompt, audio_part],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1
                 )
             )
 
             if response.text:
-                try:
-                    import json
-                    return json.loads(response.text)
-                except (json.JSONDecodeError, ValueError) as e:
-                    logger.error("Failed to parse transcription JSON", error=str(e), response_text=response.text)
-                    return None
+                import json
+                return json.loads(response.text)
             return None
 
         except Exception as e:
@@ -313,6 +295,26 @@ class AIServices:
 
         except Exception as e:
             logger.error("Failed to generate response", query_length=len(query), context_docs_count=len(context_docs), error=str(e))
+            return None
+
+    async def generate_general_response(self, prompt: str, language: str) -> Optional[str]:
+        """Generate a general response using LLM without specific context documents."""
+        try:
+            response = self.genai_client.models.generate_content(
+                model=settings.llm_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.3  # Slightly higher temperature for more natural responses
+                )
+            )
+
+            if response.text:
+                return response.text
+            return None
+
+        except Exception as e:
+            logger.error("Failed to generate general response", error=str(e))
             return None
     
     async def clean_document_text(self, raw_text: str) -> Optional[str]:

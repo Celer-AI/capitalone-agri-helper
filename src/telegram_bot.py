@@ -115,9 +115,6 @@ class TelegramBotHandler:
                     chat_id=message.chat_id,
                     text=response
                 )
-
-                # Send feedback buttons
-                await self._send_feedback_buttons(message.chat_id)
                 
             else:
                 await self._send_processing_error_message(message.chat_id)
@@ -129,26 +126,34 @@ class TelegramBotHandler:
     async def _handle_voice_message(self, message):
         """Handle voice message from user."""
         user_id = message.from_user.id
-        
+
         try:
             # Send typing indicator
             await self.bot.send_chat_action(chat_id=message.chat_id, action="typing")
-            
+
+            logger.info("Processing voice message", user_id=user_id, file_id=message.voice.file_id)
+
             # Download voice file
             voice_file = await self.bot.get_file(message.voice.file_id)
-            
+            logger.info("Voice file downloaded", file_path=voice_file.file_path, file_size=voice_file.file_size)
+
             # Download audio data
             async with httpx.AsyncClient() as client:
                 response = await client.get(voice_file.file_path)
                 audio_data = response.content
-            
+                logger.info("Audio data downloaded", data_size=len(audio_data))
+
             # Process through RAG pipeline
             response, metadata = await self.rag_pipeline.process_voice_query(
-                audio_data, 
+                audio_data,
                 "audio/ogg",  # Telegram voice messages are in OGG format
                 user_id
             )
-            
+
+            logger.info("Voice processing completed",
+                       response_available=bool(response),
+                       metadata_keys=list(metadata.keys()) if metadata else [])
+
             if response:
                 # Increment user chat count
                 await self.database.increment_user_chat_count(user_id)
@@ -170,12 +175,10 @@ class TelegramBotHandler:
                     text=response
                 )
 
-                # Send feedback buttons
-                await self._send_feedback_buttons(message.chat_id)
-                
             else:
+                logger.warning("No response from voice processing", user_id=user_id, metadata=metadata)
                 await self._send_voice_processing_error_message(message.chat_id)
-                
+
         except Exception as e:
             logger.error("Failed to handle voice message", user_id=user_id, error=str(e))
             await self._send_error_message(message.chat_id)
@@ -272,23 +275,7 @@ class TelegramBotHandler:
         
         await self.bot.send_message(chat_id=chat_id, text=limit_text)
     
-    async def _send_feedback_buttons(self, chat_id: int):
-        """Send feedback buttons after response."""
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("👍 मददगार", callback_data="feedback_helpful"),
-                InlineKeyboardButton("👎 मददगार नहीं", callback_data="feedback_not_helpful")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await self.bot.send_message(
-            chat_id=chat_id,
-            text="क्या यह जानकारी मददगार थी?",
-            reply_markup=reply_markup
-        )
+
     
     async def _send_error_message(self, chat_id: int):
         """Send generic error message."""

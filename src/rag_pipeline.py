@@ -79,7 +79,7 @@ class RAGPipeline:
 
             if not retrieved_docs:
                 logger.warning("No documents retrieved for query", user_id=user_id, query=user_query)
-                return await self._generate_no_context_response(user_query, final_language), metadata
+                return await self._generate_no_context_response_with_llm(user_query, final_language), metadata
 
             # Step 5: Rerank documents for relevance
             reranked_docs = await self.ai_services.rerank_documents(user_query, retrieved_docs)
@@ -170,24 +170,99 @@ I can only provide information about government schemes that are in my database.
         }
         
         return fallback_responses.get(language, fallback_responses['English'])
+
+    async def _generate_no_context_response_with_llm(self, query: str, language: str) -> str:
+        """Generate a response when no relevant documents are found using LLM."""
+        try:
+            # Use the LLM to generate a helpful response even without specific documents
+            prompt = f"""The user asked: "{query}"
+
+I don't have specific documents about this topic in my database, but I can still provide helpful general information. Please provide a helpful response in {language} that:
+
+1. Acknowledges their question
+2. Provides general guidance based on common knowledge about Indian agricultural schemes and finance
+3. Suggests specific next steps they can take
+4. Mentions relevant contact information like Kisan Call Center (1800-180-1551)
+5. Is professional and helpful
+
+Keep the response concise but informative."""
+
+            response = await self.ai_services.generate_general_response(prompt, language)
+
+            if response:
+                return response
+            else:
+                # Fallback to static responses if LLM fails
+                return self._get_fallback_response(language)
+
+        except Exception as e:
+            logger.error("Failed to generate no-context response", error=str(e))
+            return self._get_fallback_response(language)
+
+    def _get_fallback_response(self, language: str) -> str:
+        """Get static fallback response when LLM generation fails."""
+        fallback_responses = {
+            'Hindi': """मुझे खुशी है कि आपने सवाल पूछा है, लेकिन मेरे पास इस विषय पर पूरी जानकारी नहीं है।
+
+कृपया निम्नलिखित करें:
+1. अपने नजदीकी कृषि विभाग के कार्यालय से संपर्क करें
+2. किसान कॉल सेंटर (1800-180-1551) पर कॉल करें
+3. PM-KISAN या KCC जैसी योजनाओं के लिए अपने बैंक से बात करें
+
+मैं केवल उन सरकारी योजनाओं के बारे में जानकारी दे सकता हूं जो मेरे डेटाबेस में हैं।""",
+
+            'Tamil': """உங்கள் கேள்விக்கு நான் மகிழ்ச்சியடைகிறேன், ஆனால் இந்த விஷயத்தில் எனக்கு முழுமையான தகவல் இல்லை.
+
+தயவுசெய்து பின்வருவனவற்றைச் செய்யுங்கள்:
+1. உங்கள் அருகிலுள்ள வேளாண்மைத் துறை அலுவலகத்தைத் தொடர்பு கொள்ளுங்கள்
+2. விவசாயி அழைப்பு மையத்தை (1800-180-1551) அழைக்கவும்
+3. PM-KISAN அல்லது KCC போன்ற திட்டங்களுக்கு உங்கள் வங்கியுடன் பேசுங்கள்
+
+எனது தரவுத்தளத்தில் உள்ள அரசாங்க திட்டங்களைப் பற்றி மட்டுமே என்னால் தகவல் வழங்க முடியும்.""",
+
+            'English': """I'm glad you asked, but I don't have complete information on this topic.
+
+Please try the following:
+1. Contact your nearest Agriculture Department office
+2. Call the Kisan Call Center (1800-180-1551)
+3. Speak with your bank about schemes like PM-KISAN or KCC
+
+I can only provide information about government schemes that are in my database."""
+        }
+
+        return fallback_responses.get(language, fallback_responses['English'])
     
     async def process_voice_query(self, audio_data: bytes, mime_type: str, user_id: int) -> Tuple[Optional[str], Dict[str, Any]]:
         """Process voice query through transcription and RAG pipeline."""
         metadata = { 'user_id': user_id, 'input_type': 'voice' }
 
         try:
+            logger.info("Starting voice query processing", user_id=user_id, audio_size=len(audio_data), mime_type=mime_type)
+
             # Step 1: Transcribe audio using the new function
             transcription_result = await self.ai_services.transcribe_audio(audio_data, mime_type)
 
-            if not transcription_result or 'transcribed_english_text' not in transcription_result:
-                logger.error("Failed to get valid transcription", user_id=user_id)
+            logger.info("Transcription result", user_id=user_id, result=transcription_result)
+
+            if not transcription_result:
+                logger.error("No transcription result returned", user_id=user_id)
+                return None, metadata
+
+            if 'transcribed_english_text' not in transcription_result:
+                logger.error("Missing transcribed_english_text in result", user_id=user_id, result_keys=list(transcription_result.keys()))
                 return None, metadata
 
             transcribed_text = transcription_result['transcribed_english_text']
             detected_language = transcription_result.get('detected_language', 'Hindi') # Default to Hindi
 
+            if not transcribed_text or transcribed_text.strip() == "":
+                logger.error("Empty transcription text", user_id=user_id)
+                return None, metadata
+
             metadata['transcription'] = transcribed_text
             metadata['detected_language_from_audio'] = detected_language
+
+            logger.info("Transcription successful", user_id=user_id, transcribed_text=transcribed_text, detected_language=detected_language)
 
             # Step 2: Process the ENGLISH transcription through the RAG pipeline
             # We will tell the final generation step to use the original detected language

@@ -47,38 +47,46 @@ class DocumentProcessor:
         }
         
         try:
-            # Step 1: Extract text from PDF
+            # Step 1: Upload document to Supabase storage
+            storage_url = await self.database.upload_document_to_storage(file_content, filename)
+            if not storage_url:
+                logger.warning("Failed to upload document to storage, continuing without storage URL", filename=filename)
+
+            result['processing_steps']['storage_upload'] = bool(storage_url)
+            result['storage_url'] = storage_url
+
+            # Step 2: Extract text from PDF
             raw_text = await self._extract_text_from_pdf(file_content)
             if not raw_text:
                 result['error'] = "Failed to extract text from PDF"
                 return result
-            
+
             result['processing_steps']['text_extraction'] = True
             result['raw_text_length'] = len(raw_text)
-            
-            # Step 2: Clean text using AI
+
+            # Step 3: Clean text using AI
             cleaned_text = await self.ai_services.clean_document_text(raw_text)
             if not cleaned_text:
                 logger.warning("AI cleaning failed, using raw text", filename=filename)
                 cleaned_text = raw_text
-            
+
             result['processing_steps']['text_cleaning'] = True
             result['cleaned_text_length'] = len(cleaned_text)
-            
-            # Step 3: Split text into chunks
+
+            # Step 4: Split text into chunks
             chunks = await self._create_text_chunks(cleaned_text)
             result['chunks_created'] = len(chunks)
             result['processing_steps']['text_chunking'] = True
-            
+
             if not chunks:
                 result['error'] = "No chunks created from text"
                 return result
-            
-            # Step 4: Generate embeddings for chunks
-            chunk_data = await self._generate_chunk_embeddings(chunks, filename)
+
+            # Step 5: Generate embeddings for chunks
+            chunk_data = await self._generate_chunk_embeddings(chunks, filename, storage_url)
             result['processing_steps']['embedding_generation'] = True
-            
-            # Step 5: Store chunks in database
+
+            # Step 6: Store chunks in database
             stored_count = await self._store_chunks(chunk_data)
             result['chunks_stored'] = stored_count
             result['processing_steps']['database_storage'] = True
@@ -152,7 +160,7 @@ class DocumentProcessor:
                 return result
             
             # Step 3: Generate embeddings for chunks
-            chunk_data = await self._generate_chunk_embeddings(chunks, source_name)
+            chunk_data = await self._generate_chunk_embeddings(chunks, source_name, None)
             result['processing_steps']['embedding_generation'] = True
             
             # Step 4: Store chunks in database
@@ -238,7 +246,7 @@ class DocumentProcessor:
             logger.error("Text chunking failed", error=str(e))
             return []
     
-    async def _generate_chunk_embeddings(self, chunks: List[str], source_document: str) -> List[Dict[str, Any]]:
+    async def _generate_chunk_embeddings(self, chunks: List[str], source_document: str, storage_url: Optional[str] = None) -> List[Dict[str, Any]]:
         """Generate embeddings for text chunks."""
         try:
             # Generate embeddings in batches
@@ -260,7 +268,8 @@ class DocumentProcessor:
                         chunk_data.append({
                             'content': chunk,
                             'embedding': embedding,
-                            'source_document': source_document
+                            'source_document': source_document,
+                            'storage_url': storage_url
                         })
                     else:
                         logger.warning("Failed to generate embedding for chunk", 

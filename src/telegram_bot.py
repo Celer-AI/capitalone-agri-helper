@@ -110,12 +110,22 @@ class TelegramBotHandler:
                     response_time_ms=metadata.get('response_time_ms')
                 )
 
-                # Send response
-                await self.bot.send_message(
-                    chat_id=message.chat_id,
-                    text=response,
-                    parse_mode='Markdown'
-                )
+                # Send response with proper error handling
+                try:
+                    await self.bot.send_message(
+                        chat_id=message.chat_id,
+                        text=response
+                    )
+                except Exception as send_error:
+                    logger.error("Failed to send message", error=str(send_error))
+                    # Try sending a fallback message
+                    try:
+                        await self.bot.send_message(
+                            chat_id=message.chat_id,
+                            text="मुझे खुशी होगी आपकी मदद करने में। कृपया अपना प्रश्न दोबारा पूछें।\n\nI'd be happy to help you. Please rephrase your question."
+                        )
+                    except:
+                        pass  # If even fallback fails, just log and continue
 
                 # Send feedback buttons
                 await self._send_feedback_buttons(message.chat_id)
@@ -165,12 +175,22 @@ class TelegramBotHandler:
                     response_time_ms=metadata.get('response_time_ms')
                 )
 
-                # Send response
-                await self.bot.send_message(
-                    chat_id=message.chat_id,
-                    text=response,
-                    parse_mode='Markdown'
-                )
+                # Send response with proper error handling
+                try:
+                    await self.bot.send_message(
+                        chat_id=message.chat_id,
+                        text=response
+                    )
+                except Exception as send_error:
+                    logger.error("Failed to send voice response", error=str(send_error))
+                    # Try sending a fallback message
+                    try:
+                        await self.bot.send_message(
+                            chat_id=message.chat_id,
+                            text="मुझे खुशी होगी आपकी मदद करने में। कृपया अपना प्रश्न दोबारा पूछें।\n\nI'd be happy to help you. Please rephrase your question."
+                        )
+                    except:
+                        pass  # If even fallback fails, just log and continue
 
                 # Send feedback buttons
                 await self._send_feedback_buttons(message.chat_id)
@@ -181,7 +201,8 @@ class TelegramBotHandler:
         except Exception as e:
             logger.error("Failed to handle voice message", user_id=user_id, error=str(e))
             await self._send_error_message(message.chat_id)
-    
+
+
     async def _handle_command(self, message):
         """Handle bot commands."""
         command = message.text.lower()

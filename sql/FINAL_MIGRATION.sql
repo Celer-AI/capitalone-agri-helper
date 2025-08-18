@@ -157,13 +157,17 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='chat_history' AND column_name='message_type') THEN
         ALTER TABLE chat_history ADD COLUMN message_type TEXT DEFAULT 'text' CHECK (message_type IN ('text', 'voice'));
     END IF;
-    
+
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='chat_history' AND column_name='language_detected') THEN
         ALTER TABLE chat_history ADD COLUMN language_detected TEXT;
     END IF;
-    
+
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='chat_history' AND column_name='response_time_ms') THEN
         ALTER TABLE chat_history ADD COLUMN response_time_ms INTEGER;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='chat_history' AND column_name='metadata') THEN
+        ALTER TABLE chat_history ADD COLUMN metadata JSONB DEFAULT '{}';
     END IF;
 END $$;
 

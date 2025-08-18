@@ -50,22 +50,28 @@ async def lifespan(app: FastAPI):
         test_result = db.client.table('users').select('count').limit(1).execute()
         logger.info("Database connection verified successfully")
         
-        # Set up Telegram webhook if URL is provided
-        if settings.telegram_webhook_url:
+        # Set up Telegram webhook if URL is provided and it's HTTPS
+        if settings.telegram_webhook_url and settings.telegram_webhook_url.startswith('https://'):
             webhook_success = await telegram_bot.setup_webhook(settings.telegram_webhook_url)
             if webhook_success:
                 logger.info("Telegram webhook configured", webhook_url=settings.telegram_webhook_url)
             else:
                 logger.warning("Failed to configure Telegram webhook")
+        elif settings.telegram_webhook_url:
+            logger.info("Skipping webhook setup for local development (HTTP not supported)",
+                       webhook_url=settings.telegram_webhook_url)
         
-        # Log startup analytics
-        await db.log_analytics_event('application_started', metadata={
-            'environment': settings.environment,
-            'models': {
-                'llm': settings.llm_model,
-                'embedding': settings.embedding_model
-            }
-        })
+        # Log startup analytics (gracefully handle if table doesn't exist)
+        try:
+            await db.log_analytics_event('application_started', metadata={
+                'environment': settings.environment,
+                'models': {
+                    'llm': settings.llm_model,
+                    'embedding': settings.embedding_model
+                }
+            })
+        except Exception as e:
+            logger.warning("Could not log startup analytics", error=str(e))
         
         logger.info("Application startup completed successfully")
         
@@ -78,10 +84,13 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down Agri-Credit Helper application")
     
-    # Log shutdown analytics
-    await db.log_analytics_event('application_shutdown', metadata={
-        'environment': settings.environment
-    })
+    # Log shutdown analytics (gracefully handle if table doesn't exist)
+    try:
+        await db.log_analytics_event('application_shutdown', metadata={
+            'environment': settings.environment
+        })
+    except Exception as e:
+        logger.warning("Could not log shutdown analytics", error=str(e))
 
 
 # Create FastAPI application
@@ -117,10 +126,11 @@ async def root():
 async def health_check():
     """Health check endpoint."""
     try:
+        from datetime import datetime
         # Basic health checks
         health_status = {
             "status": "healthy",
-            "timestamp": structlog.processors.TimeStamper(fmt="iso")(),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
             "environment": settings.environment,
             "services": {
                 "database": "healthy",  # Could add actual DB ping
@@ -128,9 +138,9 @@ async def health_check():
                 "telegram_bot": "healthy"
             }
         }
-        
+
         return health_status
-        
+
     except Exception as e:
         logger.error("Health check failed", error=str(e))
         raise HTTPException(status_code=503, detail="Service unhealthy")
@@ -474,12 +484,15 @@ async def global_exception_handler(request: Request, exc: Exception):
                 method=request.method,
                 error=str(exc))
     
-    # Log error analytics
-    await db.log_analytics_event('application_error', metadata={
-        'path': request.url.path,
-        'method': request.method,
-        'error': str(exc)
-    })
+    # Log error analytics (gracefully handle if table doesn't exist)
+    try:
+        await db.log_analytics_event('application_error', metadata={
+            'path': request.url.path,
+            'method': request.method,
+            'error': str(exc)
+        })
+    except Exception:
+        pass  # Don't log errors about logging errors
     
     return JSONResponse(
         status_code=500,

@@ -18,18 +18,15 @@ class Settings(BaseSettings):
     
     # Supabase Configuration (JWT KEYS)
     supabase_url: str = Field(..., env="SUPABASE_URL")
-    supabase_anon_key: str = Field(..., env="SUPABASE_ANON_KEY")
+    supabase_anon_key: Optional[str] = Field(None, env="SUPABASE_ANON_KEY")
     supabase_service_role_key: str = Field(..., env="SUPABASE_SERVICE_ROLE_KEY")
     supabase_storage_bucket: str = Field("schemes", env="SUPABASE_STORAGE_BUCKET")
-    
+
     # Cohere Configuration
     cohere_api_key: str = Field(..., env="COHERE_API_KEY")
 
     # Google Cloud Configuration
-    google_cloud_project_id: str = Field(..., env="GOOGLE_CLOUD_PROJECT_ID")
-
-    # Supabase Storage Configuration
-    supabase_storage_bucket: str = Field("schemes", env="SUPABASE_STORAGE_BUCKET")
+    google_cloud_project_id: Optional[str] = Field(None, env="GOOGLE_CLOUD_PROJECT_ID")
 
     # Application Configuration
     environment: str = Field("development", env="ENVIRONMENT")
@@ -104,6 +101,18 @@ SYSTEM_PROMPT = """You are an AI assistant specialized in Indian agricultural fi
 ❌ Political discussions or opinions
 
 ## RESPONSE FORMATS:
+
+### For GREETINGS (hi, hello, hey, namaste, etc.):
+"नमस्ते! मैं आपका कृषि वित्त सहायक हूँ। मैं भारतीय किसानों की सरकारी योजनाओं, ऋण और सब्सिडी के बारे में जानकारी देता हूँ।
+
+आप मुझसे पूछ सकते हैं:
+🌾 किसान क्रेडिट कार्ड (KCC) के बारे में
+💰 PM-KISAN योजना की जानकारी
+🏦 कृषि ऋण की पात्रता
+📋 आवेदन प्रक्रिया और दस्तावेज
+📞 स्थानीय कार्यालयों की जानकारी
+
+कृपया अपना प्रश्न पूछें!"
 
 ### When you have CLEAR INFORMATION:
 - Provide direct, actionable answers

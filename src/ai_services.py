@@ -214,47 +214,74 @@ Rules:
             return None
     
     async def rerank_documents(self, query: str, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Rerank documents using Cohere's rerank API v3.5 with context limit handling."""
+        """Rerank documents using Cohere's rerank API v3.5 with proper error handling."""
         try:
             if not documents:
+                logger.warning("No documents provided for reranking")
                 return []
 
-            # Prepare documents for reranking with context limit consideration
+            # Clean and validate query
+            if not query or not query.strip():
+                logger.warning("Empty query provided for reranking")
+                return documents[:settings.rerank_top_k]
+
+            query = query.strip()
+
+            # Prepare documents for reranking with better context management
             doc_texts = []
             doc_mapping = []
-            total_chars = 0
+            total_tokens = 0
+            max_tokens = 4000  # Conservative limit for rerank-v3.5
 
             for i, doc in enumerate(documents):
-                content = doc['content']
-                # Estimate if adding this document would exceed context limit
-                # Rough estimate: 1 token ≈ 4 characters, context limit is 4096 tokens
-                if total_chars + len(content) > settings.rerank_context_limit * 4:
-                    logger.warning("Rerank context limit reached",
-                                 docs_included=len(doc_texts),
-                                 total_docs=len(documents))
+                content = doc.get('content', '').strip()
+                if not content:
+                    continue
+
+                # Estimate tokens (rough: 1 token ≈ 4 chars)
+                content_tokens = len(content) // 4
+
+                # Check if adding this document would exceed limit
+                if total_tokens + content_tokens > max_tokens:
+                    logger.info("Rerank token limit reached",
+                               docs_included=len(doc_texts),
+                               total_docs=len(documents),
+                               tokens_used=total_tokens)
                     break
 
                 doc_texts.append(content)
                 doc_mapping.append(i)
-                total_chars += len(content)
+                total_tokens += content_tokens
 
             if not doc_texts:
-                logger.warning("No documents fit within rerank context limit")
+                logger.warning("No valid documents after filtering")
                 return documents[:settings.rerank_top_k]
 
-            # Use Cohere rerank v3.5 with proper configuration
+            # Call Cohere rerank API with proper error handling
+            logger.info("Calling Cohere rerank",
+                       query_length=len(query),
+                       doc_count=len(doc_texts),
+                       estimated_tokens=total_tokens)
+
             rerank_response = self.cohere_client.rerank(
-                model=settings.rerank_model,
+                model="rerank-v3.5",  # Use explicit model name
                 query=query,
                 documents=doc_texts,
                 top_n=min(settings.rerank_top_k, len(doc_texts)),
-                max_tokens_per_doc=settings.rerank_max_tokens_per_doc,
-                return_documents=False  # We don't need documents back, just indices
+                return_documents=False
             )
 
-            # Return reranked documents with scores
+            if not rerank_response or not hasattr(rerank_response, 'results'):
+                logger.error("Invalid rerank response")
+                return documents[:settings.rerank_top_k]
+
+            # Process results
             reranked_docs = []
             for result in rerank_response.results:
+                if result.index >= len(doc_mapping):
+                    logger.warning("Invalid result index", index=result.index, max_index=len(doc_mapping)-1)
+                    continue
+
                 original_index = doc_mapping[result.index]
                 original_doc = documents[original_index]
                 reranked_docs.append({
@@ -262,24 +289,75 @@ Rules:
                     'rerank_score': result.relevance_score
                 })
 
-            logger.info("Documents reranked successfully",
+            logger.info("Rerank completed successfully",
                        input_docs=len(documents),
                        processed_docs=len(doc_texts),
                        output_docs=len(reranked_docs))
 
-            return reranked_docs
+            return reranked_docs if reranked_docs else documents[:settings.rerank_top_k]
 
         except Exception as e:
-            logger.error("Failed to rerank documents",
-                        query_length=len(query),
-                        doc_count=len(documents),
-                        error=str(e))
-            # Fallback: return top documents without reranking
+            logger.error("Rerank failed with error",
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        query_length=len(query) if query else 0,
+                        doc_count=len(documents))
+            # Always return something
             return documents[:settings.rerank_top_k]
     
     async def generate_response(self, query: str, context_docs: List[Dict[str, Any]], user_language: str = "Hindi") -> Optional[ChatResponse]:
         """Generate structured response using Gemini with context documents."""
         try:
+            # Check if this is a greeting
+            greeting_words = ['hi', 'hello', 'hey', 'namaste', 'namaskar', 'hola', 'helo', 'hii', 'helllo']
+            query_lower = query.lower().strip()
+
+            if any(greeting in query_lower for greeting in greeting_words) and len(query_lower.split()) <= 3:
+                # This is a greeting, return welcome message
+                welcome_message = {
+                    'Hindi': """नमस्ते! मैं आपका कृषि वित्त सहायक हूँ। मैं भारतीय किसानों की सरकारी योजनाओं, ऋण और सब्सिडी के बारे में जानकारी देता हूँ।
+
+आप मुझसे पूछ सकते हैं:
+🌾 किसान क्रेडिट कार्ड (KCC) के बारे में
+💰 PM-KISAN योजना की जानकारी
+🏦 कृषि ऋण की पात्रता
+📋 आवेदन प्रक्रिया और दस्तावेज
+📞 स्थानीय कार्यालयों की जानकारी
+
+कृपया अपना प्रश्न पूछें!""",
+                    'English': """Hello! I'm your Agricultural Finance Assistant. I help Indian farmers with information about government schemes, loans, and subsidies.
+
+You can ask me about:
+🌾 Kisan Credit Card (KCC)
+💰 PM-KISAN scheme information
+🏦 Agricultural loan eligibility
+📋 Application processes and documents
+📞 Local office information
+
+Please ask your question!""",
+                    'Tamil': """வணக்கம்! நான் உங்கள் விவசாய நிதி உதவியாளர். இந்திய விவசாயிகளுக்கு அரசு திட்டங்கள், கடன்கள் மற்றும் மானியங்கள் பற்றிய தகவல்களை வழங்குகிறேன்.
+
+நீங்கள் என்னிடம் கேட்கலாம்:
+🌾 கிசான் கிரெடிட் கார்டு (KCC)
+💰 PM-KISAN திட்ட தகவல்
+🏦 விவசாய கடன் தகுதி
+📋 விண்ணப்ப செயல்முறைகள்
+📞 உள்ளூர் அலுவலக தகவல்
+
+தயவுசெய்து உங்கள் கேள்வியைக் கேளுங்கள்!"""
+                }
+
+                response_text = welcome_message.get(user_language, welcome_message['Hindi'])
+
+                return ChatResponse(
+                    response_text=response_text,
+                    language=user_language,
+                    confidence_score=1.0,
+                    sources_used=[],
+                    response_type="direct_answer",
+                    suggested_actions=["Ask about KCC", "Ask about PM-KISAN", "Ask about loan eligibility"]
+                )
+
             # Prepare context from documents
             context_text = "\n\n".join([
                 f"Document: {doc['source_document']}\nContent: {doc['content']}"
@@ -288,13 +366,17 @@ Rules:
 
             sources_list = [doc.get('source_document', 'Unknown') for doc in context_docs]
 
-            # Construct structured prompt
-            prompt = f"""Based on the following government policy documents, provide a structured JSON response about agricultural finance schemes.
+            # Construct prompt that handles both context and general knowledge
+            if context_docs and len(context_text.strip()) > 100:
+                # We have good context documents
+                prompt = f"""Based on the following government policy documents, provide a structured JSON response about agricultural finance schemes.
 
 CONTEXT DOCUMENTS:
 {context_text}
 
 USER QUESTION: {query}
+
+If the context documents contain relevant information, use them. If not, you may use your general knowledge about Indian agricultural schemes but MUST add a disclaimer.
 
 Respond with this exact JSON structure:
 {{
@@ -308,10 +390,31 @@ Respond with this exact JSON structure:
 
 Rules:
 1. response_text MUST be in {user_language}
-2. confidence_score: 0.9+ if fully answered, 0.5-0.8 if partial, 0.1-0.4 if minimal info
-3. response_type: "direct_answer", "partial_info", or "no_context"
-4. suggested_actions: practical next steps for the farmer
-5. Only use information from provided documents"""
+2. If using context documents: confidence_score 0.9+, sources_used from documents
+3. If using general knowledge: Add disclaimer "⚠️ यह जानकारी सामान्य ज्ञान पर आधारित है, कृपया आधिकारिक स्रोतों से पुष्टि करें" (in Hindi) or equivalent in other languages
+4. confidence_score: 0.7 for general knowledge, sources_used: ["General Knowledge"]
+5. suggested_actions: practical next steps for the farmer"""
+            else:
+                # No relevant context, use general knowledge with disclaimer
+                prompt = f"""You are an expert on Indian agricultural finance and government schemes. Answer this question using your general knowledge.
+
+USER QUESTION: {query}
+
+Respond with this exact JSON structure:
+{{
+    "response_text": "Your helpful answer in {user_language} with disclaimer",
+    "language": "{user_language}",
+    "confidence_score": 0.7,
+    "sources_used": ["General Knowledge"],
+    "response_type": "general_knowledge",
+    "suggested_actions": ["Contact local agriculture office", "Visit official government websites"]
+}}
+
+Rules:
+1. response_text MUST be in {user_language}
+2. MUST include disclaimer: "⚠️ यह जानकारी सामान्य ज्ञान पर आधारित है, कृपया आधिकारिक स्रोतों से पुष्टि करें" (in Hindi) or equivalent
+3. Provide accurate information about Indian agricultural schemes, KCC, PM-KISAN, etc.
+4. Focus on practical, actionable advice for Indian farmers"""
 
             response = self.genai_client.models.generate_content(
                 model=settings.llm_model,

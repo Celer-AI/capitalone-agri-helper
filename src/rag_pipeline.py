@@ -75,11 +75,17 @@ class RAGPipeline:
                 return await self._generate_no_context_response(user_query, language_result.detected_language), metadata
 
             # Step 5: Rerank documents for relevance
-            reranked_docs = await self.ai_services.rerank_documents(user_query, retrieved_docs)
-            metadata['reranked_docs'] = len(reranked_docs)
-            metadata['pipeline_steps']['document_reranking'] = True
+            try:
+                reranked_docs = await self.ai_services.rerank_documents(user_query, retrieved_docs)
+                metadata['reranked_docs'] = len(reranked_docs)
+                metadata['pipeline_steps']['document_reranking'] = True
+            except Exception as e:
+                logger.info("Rerank failed, using original docs", error=str(e))
+                reranked_docs = retrieved_docs[:10]  # Use top 10 original docs
+                metadata['reranked_docs'] = len(reranked_docs)
+                metadata['pipeline_steps']['document_reranking'] = False
 
-            # Step 6: Generate structured response with context
+            # Step 6: Generate structured response with context (always try to respond)
             chat_response = await self.ai_services.generate_response(
                 user_query,
                 reranked_docs,
@@ -118,21 +124,25 @@ class RAGPipeline:
                 # Return the response text for backward compatibility
                 return chat_response.response_text, metadata
             else:
-                logger.error("Failed to generate response", user_id=user_id)
-                return None, metadata
+                logger.error("Failed to generate response, trying fallback", user_id=user_id)
+                # Fallback response
+                fallback_response = "मुझे खुशी होगी आपकी मदद करने में। कृपया अपना प्रश्न दोबारा पूछें या स्थानीय कृषि कार्यालय से संपर्क करें।\n\nI'd be happy to help you. Please rephrase your question or contact your local agriculture office."
+                return fallback_response, metadata
                 
         except Exception as e:
             logger.error("RAG pipeline failed", user_id=user_id, error=str(e))
             metadata['error'] = str(e)
-            
+
             # Log failed interaction
             await self.database.log_analytics_event(
                 'failed_query',
                 user_id=user_id,
                 metadata={'error': str(e), 'query': user_query}
             )
-            
-            return None, metadata
+
+            # Always return something, never None
+            fallback_response = "मुझे खुशी होगी आपकी मदद करने में। कृपया अपना प्रश्न दोबारा पूछें या स्थानीय कृषि कार्यालय से संपर्क करें।\n\nI'd be happy to help you. Please rephrase your question or contact your local agriculture office."
+            return fallback_response, metadata
     
     async def _generate_no_context_response(self, query: str, language: str) -> str:
         """Generate a response when no relevant documents are found."""
